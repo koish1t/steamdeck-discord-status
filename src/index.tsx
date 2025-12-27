@@ -7,8 +7,6 @@ import QuickAccessPanel from './QuickAccessPanel';
 
 export default definePlugin(() => {
     const api = Api.initialize();
-    // Attempt to reconnect on load
-    api.checkConnection().catch(() => {});
 
     return {
         name: 'Discord Status',

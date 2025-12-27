@@ -1,18 +1,21 @@
-import { FC, Fragment, useCallback, useContext, useMemo } from 'react';
-import { ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, Spinner } from '@decky/ui';
+import { FC, Fragment, useCallback, useContext, useMemo, useState } from 'react';
+import { ButtonItem, DropdownItem, Field, PanelSection, PanelSectionRow, Spinner, TextField } from '@decky/ui';
 import { Actions, ConnectionStatus, Context } from './context';
-import { FaCheck } from 'react-icons/fa';
+import { FaCheck, FaEye, FaEyeSlash } from 'react-icons/fa';
 
 const QuickAccessPanel: FC<{}> = () => {
     const [state, dispatch] = useContext(Context);
+    const [tokenInput, setTokenInput] = useState(state.token);
+    const [showToken, setShowToken] = useState(false);
 
-    const onClick = useCallback(async () => {
+    const onSaveToken = useCallback(async () => {
+        dispatch(Actions.setToken(tokenInput));
+        dispatch(Actions.connect());
+    }, [dispatch, tokenInput]);
+
+    const onReconnect = useCallback(async () => {
         dispatch(Actions.connect());
     }, [dispatch]);
-
-    const onLaunchDiscord = useCallback(async () => {
-        dispatch(Actions.launchDiscord());
-    }, []);
 
     const options = useMemo(
         () => [
@@ -31,40 +34,55 @@ const QuickAccessPanel: FC<{}> = () => {
     return (
         <PanelSection>
             <PanelSectionRow>
+                <Field label="Discord Token" description="Your Discord user token for authentication">
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <TextField
+                            value={tokenInput}
+                            onChange={(e) => setTokenInput(e.target.value)}
+                            bIsPassword={!showToken}
+                            style={{ flex: 1 }}
+                        />
+                        <div
+                            onClick={() => setShowToken(!showToken)}
+                            style={{ cursor: 'pointer', padding: '8px' }}
+                        >
+                            {showToken ? <FaEyeSlash /> : <FaEye />}
+                        </div>
+                    </div>
+                </Field>
+            </PanelSectionRow>
+            <PanelSectionRow>
+                <ButtonItem layout="below" onClick={onSaveToken}>
+                    Save Token & Connect
+                </ButtonItem>
+            </PanelSectionRow>
+
+            <PanelSectionRow>
                 {state.connectionStatus === ConnectionStatus.CONNECTING && (
                     <Fragment>
-                        <Field childrenLayout="inline" label="Checking connection...">
+                        <Field childrenLayout="inline" label="Connecting...">
                             <Spinner />
                         </Field>
-                        <div style={{ padding: '4px 0px' }}>
-                            Discord must be running for this plugin to connect.
+                    </Fragment>
+                )}
+                {state.connectionStatus === ConnectionStatus.DISCONNECTED && state.token && (
+                    <Fragment>
+                        <ButtonItem layout="below" onClick={onReconnect}>
+                            Reconnect
+                        </ButtonItem>
+                        <div style={{ padding: '4px 0px', color: '#dcdedf' }}>
+                            Not connected to Discord.
                         </div>
                     </Fragment>
                 )}
-                {state.connectionStatus === ConnectionStatus.DISCONNECTED &&
-                    !state.discordAppId && (
-                        <Fragment>
-                            <ButtonItem layout="below" onClick={onClick}>
-                                Reconnect to Discord
-                            </ButtonItem>
-                            <div style={{ padding: '4px 0px' }}>
-                                Discord must be running for this plugin to connect.
-                            </div>
-                        </Fragment>
-                    )}
-                {state.connectionStatus === ConnectionStatus.DISCONNECTED && state.discordAppId && (
-                    <Fragment>
-                        <ButtonItem layout="below" onClick={onLaunchDiscord}>
-                            Launch Discord
-                        </ButtonItem>
-                        <div style={{ padding: '4px 0px' }}>
-                            Discord must be running for this plugin to connect.
-                        </div>
-                    </Fragment>
+                {state.connectionStatus === ConnectionStatus.DISCONNECTED && !state.token && (
+                    <div style={{ padding: '4px 0px', color: '#dcdedf' }}>
+                        Enter your Discord token above to connect.
+                    </div>
                 )}
                 {state.connectionStatus === ConnectionStatus.CONNECTED && (
                     <Fragment>
-                        <Field label="Connected">
+                        <Field label={`Connected as ${state.user?.global_name || state.user?.username || 'Unknown'}`}>
                             <FaCheck />
                         </Field>
                     </Fragment>

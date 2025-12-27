@@ -1,6 +1,6 @@
 import React, { createContext, useEffect, useReducer } from 'react';
 import { ActionsUnion, createAction, createActionPayload } from './actions';
-import { Activity, Api, Event } from './api';
+import { Activity, Api, DiscordUser, Event } from './api';
 
 export enum ConnectionStatus {
     DISCONNECTED,
@@ -11,22 +11,24 @@ export enum ConnectionStatus {
 interface State {
     currentApp: Activity | null;
     connectionStatus: ConnectionStatus;
-    discordAppId: string | null;
+    token: string;
+    user: DiscordUser | null;
     runningApps: Activity[];
 }
 
 const DEFAULT_STATE: State = {
     currentApp: null,
     connectionStatus: ConnectionStatus.DISCONNECTED,
-    discordAppId: null,
+    token: '',
+    user: null,
     runningApps: []
 };
 
 export const ACTION_CHANGE_RUNNING_APP = 'action:change-running-app';
 export const ACTION_CONNECT = 'action:connect';
-export const ACTION_LAUNCH_DISCORD = 'action:launch-discord';
+export const ACTION_SET_TOKEN = 'action:set-token';
+export const ACTION_SET_USER = 'action:set-user';
 export const ACTION_SET_CONNECTION_STATUS = 'action:set-connection-status';
-export const ACTION_SET_DISCORD_APP_ID = 'action:set-discord-app-id';
 export const ACTION_SET_RUNNING_APP = 'action:set-running-app';
 export const ACTION_UPDATE_APPS = 'action:update-apps';
 
@@ -35,12 +37,10 @@ export const Actions = {
         ACTION_CHANGE_RUNNING_APP
     ),
     connect: createAction<typeof ACTION_CONNECT>(ACTION_CONNECT),
-    launchDiscord: createAction<typeof ACTION_LAUNCH_DISCORD>(ACTION_LAUNCH_DISCORD),
+    setToken: createActionPayload<typeof ACTION_SET_TOKEN, string>(ACTION_SET_TOKEN),
+    setUser: createActionPayload<typeof ACTION_SET_USER, DiscordUser | null>(ACTION_SET_USER),
     setConnectionStatus: createActionPayload<typeof ACTION_SET_CONNECTION_STATUS, ConnectionStatus>(
         ACTION_SET_CONNECTION_STATUS
-    ),
-    setDiscordAppId: createActionPayload<typeof ACTION_SET_DISCORD_APP_ID, string>(
-        ACTION_SET_DISCORD_APP_ID
     ),
     setRunningApp: createActionPayload<typeof ACTION_SET_RUNNING_APP, Activity | null>(
         ACTION_SET_RUNNING_APP
@@ -64,10 +64,15 @@ function reducer(state: State, action: AcceptedActions): State {
                 ...state,
                 connectionStatus: action.payload
             };
-        case ACTION_SET_DISCORD_APP_ID:
+        case ACTION_SET_TOKEN:
             return {
                 ...state,
-                discordAppId: action.payload
+                token: action.payload
+            };
+        case ACTION_SET_USER:
+            return {
+                ...state,
+                user: action.payload
             };
         case ACTION_SET_RUNNING_APP:
             return {
@@ -102,11 +107,9 @@ function enhancedDispatch(api: Api, dispatch: React.Dispatch<AcceptedActions>) {
                 );
 
                 break;
-            case ACTION_LAUNCH_DISCORD:
-                dispatch(Actions.setConnectionStatus(ConnectionStatus.CONNECTING));
-
-                await api.launchDiscord();
-
+            case ACTION_SET_TOKEN:
+                await api.setToken(action.payload);
+                dispatch(action);
                 break;
             default:
                 dispatch(action);
@@ -146,7 +149,8 @@ const Provider: React.FC<ProviderProps> = (props) => {
             .on(Event.disconnect, () =>
                 dispatch(Actions.setConnectionStatus(ConnectionStatus.DISCONNECTED))
             )
-            .on(Event.discordAppIdSet, (appId: string) => dispatch(Actions.setDiscordAppId(appId)))
+            .on(Event.tokenSet, (token: string) => dispatch(Actions.setToken(token)))
+            .on(Event.userSet, (user: DiscordUser | null) => dispatch(Actions.setUser(user)))
             .on(Event.connecting, () =>
                 dispatch(Actions.setConnectionStatus(ConnectionStatus.CONNECTING))
             )
@@ -164,7 +168,11 @@ const Provider: React.FC<ProviderProps> = (props) => {
         dispatch(Actions.updateApps(Object.values(props.api.activities)));
         dispatch(Actions.setRunningApp(props.api.runningActivity));
 
-        if (!props.api.connected) {
+        if (props.api.token) {
+            dispatch(Actions.setToken(props.api.token));
+        }
+
+        if (!props.api.connected && props.api.token) {
             dispatch(Actions.connect());
         }
 

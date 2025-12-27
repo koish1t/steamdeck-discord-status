@@ -1,205 +1,249 @@
 import asyncio
 import json
-import os
-import socket
-import struct
-import uuid
-
+import ssl
+import aiohttp
+import certifi
 import decky
 
-CLIENT_ID = "1055680235682672682"
+GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
 
-OP_HANDSHAKE = 0
-OP_FRAME = 1
-OP_CLOSE = 2
-OP_PING = 3
-OP_PONG = 4
+OP_DISPATCH = 0
+OP_HEARTBEAT = 1
+OP_IDENTIFY = 2
+OP_PRESENCE_UPDATE = 3
+OP_HELLO = 10
+OP_HEARTBEAT_ACK = 11
 
-class EmptyReceiveException(Exception):
-    """Raised when the socket was expected data but did not receive any"""
-
-class HandshakeException(Exception):
-    """Raised when the handshake fails"""
-
-class Pipe:
-    def get_ipc_file():
-        flatpak_root = "/run/user/1000/app/com.discordapp.Discord"
-        other_root = os.environ.get("XDG_RUNTIME_DIR") or "/run/user/1000"
-
-        for i in range(10):
-            path = os.path.join(flatpak_root, "discord-ipc-{}".format(i))
-            if os.path.exists(path):
-                return path
-            path = os.path.join(other_root, "discord-ipc-{}".format(i))
-            if os.path.exists(path):
-                return path
-        
-        return None
-
-    def __init__(self, app_id):
-        decky.logger.info("Initializing pipe")
-        self.app_id = app_id
-        self.socket = socket.socket(socket.AF_UNIX)
-        self.connected = True
-
-        file_path = Pipe.get_ipc_file()
-        if file_path is None:
-            self.connected = False
-        else:
-            self.socket.connect(file_path)
-            decky.logger.debug("Connected to %s", file_path)
-
-    def disconnect(self):
-        decky.logger.info("Disconnecting")
-        self._send({}, OP_CLOSE)
-
-        self.socket.shutdown(socket.SHUT_RDWR)
-        self.socket.close()
-        self.socket = None
+class DiscordGateway:
+    def __init__(self, token):
+        self.token = token
+        self.ws = None
+        self.session = None
+        self.heartbeat_interval = None
+        self.sequence = None
+        self.heartbeat_task = None
         self.connected = False
+        self.current_activity = None
+        self.user = None
 
-    def handshake(self):
-        decky.logger.info("Beginning handshake for app %s", self.app_id)
-        self._send({'v': 1, 'client_id': self.app_id}, op=OP_HANDSHAKE)
-        data = self._recv()
-
+    async def connect(self):
         try:
-            if data['cmd'] == 'DISPATCH' and data['evt'] == 'READY':
-                decky.logger.info("Connected")
-                return True
+            decky.logger.info("Creating WebSocket connection...")
+            ssl_context = ssl.create_default_context(cafile=certifi.where())
+            self.session = aiohttp.ClientSession()
+            self.ws = await self.session.ws_connect(GATEWAY_URL, ssl=ssl_context)
+            decky.logger.info("WebSocket connected")
             
-            else:
-                decky.logger.error("Handshake failed %s", data)
-                raise HandshakeException()
+            hello = await self.ws.receive_json()
+            decky.logger.info(f"Received hello: op={hello.get('op')}")
+            if hello.get("op") != OP_HELLO:
+                decky.logger.error(f"Expected HELLO, got: {hello}")
+                await self.close()
+                return False
+            
+            self.heartbeat_interval = hello["d"]["heartbeat_interval"] / 1000
+            decky.logger.info(f"Heartbeat interval: {self.heartbeat_interval}s")
+            
+            await self.ws.send_json({"op": OP_HEARTBEAT, "d": None})
+            decky.logger.info("Sent initial heartbeat")
+            
+            await self._identify()
+            decky.logger.info("Sent IDENTIFY")
+            
+            self.heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            
+            for i in range(10):
+                try:
+                    msg = await asyncio.wait_for(self.ws.receive(), timeout=30.0)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        response = json.loads(msg.data)
+                        decky.logger.info(f"Gateway response #{i}: op={response.get('op')} t={response.get('t')}")
+                        
+                        if response.get("s"):
+                            self.sequence = response.get("s")
+                        
+                        if response.get("op") == OP_DISPATCH and response.get("t") == "READY":
+                            self.connected = True
+                            self.user = response.get("d", {}).get("user", {})
+                            decky.logger.info(f"Connected as {self.user.get('username')}")
+                            return True
+                        
+                        if response.get("op") == 9:
+                            decky.logger.error("Invalid session - token may be invalid")
+                            await self.close()
+                            return False
+                    elif msg.type == aiohttp.WSMsgType.CLOSED:
+                        decky.logger.error("WebSocket closed unexpectedly")
+                        await self.close()
+                        return False
+                    elif msg.type == aiohttp.WSMsgType.ERROR:
+                        decky.logger.error(f"WebSocket error: {msg.data}")
+                        await self.close()
+                        return False
+                except asyncio.TimeoutError:
+                    decky.logger.error("Timeout waiting for Gateway response")
+                    await self.close()
+                    return False
+            
+            decky.logger.error("Did not receive READY event after 10 messages")
+            await self.close()
+            return False
+        except Exception as e:
+            decky.logger.error(f"Gateway connection error: {e}")
+            await self.close()
+            return False
 
-        except KeyError:
-            if data['code'] == 4000:
-                decky.logger.error("Handshake failed %s", data)
-                raise HandshakeException()
+    async def _identify(self):
+        payload = {
+            "op": OP_IDENTIFY,
+            "d": {
+                "token": self.token,
+                "properties": {
+                    "os": "linux",
+                    "browser": "steamdeck-discord-status",
+                    "device": "steamdeck-discord-status"
+                },
+                "presence": {
+                    "activities": [],
+                    "status": "online",
+                    "since": 0,
+                    "afk": False
+                }
+            }
+        }
+        await self.ws.send_json(payload)
 
-    def _recv(self):
-        recv_data = self.socket.recv(1024)
-        enc_header = recv_data[:8]
-        dec_header = struct.unpack("<ii", enc_header)
-        enc_data = recv_data[8:]
+    async def _heartbeat_loop(self):
+        try:
+            while self.connected or self.ws:
+                await asyncio.sleep(self.heartbeat_interval)
+                if self.ws and not self.ws.closed:
+                    await self.ws.send_json({
+                        "op": OP_HEARTBEAT,
+                        "d": self.sequence
+                    })
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            decky.logger.error(f"Heartbeat error: {e}")
 
-        output = json.loads(enc_data.decode('UTF-8'))
+    async def update_presence(self, activity):
+        if not self.ws or self.ws.closed:
+            return False
         
-        decky.logger.info(output)
-        return output
-    
-    def _send(self, payload, op=OP_FRAME):
-        decky.logger.info(payload)
+        self.current_activity = activity
+        
+        activities = []
+        if activity:
+            game_activity = {
+                "name": activity["details"]["name"],
+                "type": 0,
+                "timestamps": {
+                    "start": activity["startTime"]
+                }
+            }
+            
+            if "imageUrl" in activity and activity["imageUrl"]:
+                game_activity["assets"] = {
+                    "large_image": activity["imageUrl"]
+                }
+            
+            activities.append(game_activity)
+        
+        payload = {
+            "op": OP_PRESENCE_UPDATE,
+            "d": {
+                "since": 0,
+                "activities": activities,
+                "status": "online",
+                "afk": False
+            }
+        }
+        
+        try:
+            await self.ws.send_json(payload)
+            decky.logger.info(f"Presence updated: {activity['details']['name'] if activity else 'cleared'}")
+            return True
+        except Exception as e:
+            decky.logger.error(f"Failed to update presence: {e}")
+            return False
 
-        payload = json.dumps(payload).encode('UTF-8')
-        payload = struct.pack('<ii', op, len(payload)) + payload
-
-        self.socket.send(payload)
+    async def close(self):
+        self.connected = False
+        if self.heartbeat_task:
+            self.heartbeat_task.cancel()
+            try:
+                await self.heartbeat_task
+            except asyncio.CancelledError:
+                pass
+            self.heartbeat_task = None
+        if self.ws:
+            await self.ws.close()
+            self.ws = None
+        if self.session:
+            await self.session.close()
+            self.session = None
 
 class Plugin:
-    async def debug(self, args):
-        decky.logger.debug("Called with %s ", args)
+    def __init__(self):
+        self.gateway = None
+        self.token = None
 
-    async def clear_activity(self):
-        if self.pipe is None:
-            return False
-        
-        decky.logger.info("Clearing activity")
-
-        data = {
-            "cmd": "SET_ACTIVITY",
-            "args": {
-                "pid": os.getpid()
-            },
-            "nonce": str(uuid.uuid4())
-        }
-
-        self.pipe._send(data)
-        self.pipe.disconnect()
-        self.pipe = None
-
+    async def set_token(self, token):
+        self.token = token
         return True
 
-    async def update_activity(self, activity):
-        #if self.pipe:
-        #    decky_plugin.logger.info("Clearing old pipe")
-        #    self.pipe.disconnect()
-        #    self.pipe = None
+    async def get_token(self):
+        return self.token or ""
 
-        try:
-            data = {
-                "cmd": "SET_ACTIVITY",
-                "args": {
-                    "pid": os.getpid(),
-                    "activity": {
-                        "state": "on Steam Deck",
-                        "assets": {
-                            "large_image": activity["imageUrl"],
-                            "small_image": "https://cdn.discordapp.com/app-assets/1055680235682672682/1056080943783354388.png"
-                        },
-                        "timestamps": {
-                            "start": activity["startTime"]
-                        }
-                    },
-                },
-                "nonce": str(uuid.uuid4())
-            }
-
-            discord_id = CLIENT_ID
-
-            if "discordId" in activity:
-                discord_id = activity["discordId"]
-            else:
-                data["args"]["activity"]["details"] = "Playing {}".format(activity["details"]["name"])
-
-            decky.logger.info("Updating activity: %s (%s)", activity["details"]["name"], discord_id)
-            self.pipe = Pipe(discord_id)
-
-            if self.pipe.connected:
-                self.pipe.handshake()
-                self.pipe._send(data)
-                return True
-            else:
-                return False
-        except Exception as e:
-            decky.logger.error(e)
+    async def connect(self):
+        decky.logger.info("Connect called")
+        if not self.token:
+            decky.logger.error("No token set")
             return False
         
-    def check_connection(self):
-        pipe_file = Pipe.get_ipc_file()
-
-        return pipe_file is not None
+        decky.logger.info(f"Connecting with token length: {len(self.token)}")
+        
+        if self.gateway:
+            await self.gateway.close()
+        
+        self.gateway = DiscordGateway(self.token)
+        result = await self.gateway.connect()
+        decky.logger.info(f"Connection result: {result}")
+        return result
 
     async def is_connected(self):
-        decky.logger.info("Checking connection status")
-        connected = False
-        tries = 0
+        return self.gateway is not None and self.gateway.connected
 
-        while not connected and tries < 2:
-            connected = self.check_connection()
-            tries += 1
-            
-            if not connected:
-                decky.logger.warning("No IPC file, retrying in 5 seconds")
-                await asyncio.sleep(1)
-            else:
-                decky.logger.info("Found IPC file")
+    async def get_user(self):
+        if self.gateway and self.gateway.user:
+            return self.gateway.user
+        return None
 
-        return connected
+    async def clear_activity(self):
+        if not self.gateway or not self.gateway.connected:
+            return False
         
-    async def disconnect(self):
-        if self.pipe is not None and self.pipe.connected:
-            decky.logger.info("Closing connection")
-            self.pipe.disconnect()
-            self.pipe = None
+        result = await self.gateway.update_presence(None)
+        return result
 
-    # Asyncio-compatible long-running code, executed in a task when the plugin is loaded
+    async def update_activity(self, activity):
+        if not self.gateway or not self.gateway.connected:
+            connected = await self.connect()
+            if not connected:
+                return False
+        
+        result = await self.gateway.update_presence(activity)
+        return result
+
+    async def disconnect(self):
+        if self.gateway:
+            await self.gateway.close()
+            self.gateway = None
+        decky.logger.info("Disconnected from Discord")
+
     async def _main(self):
         decky.logger.info("Starting Discord status plugin")
 
-        await self.is_connected()
-
-    
-    # Function called first during the unload process, utilize this to handle your plugin being removed
     async def _unload(self):
-        self.disconnect()
+        await self.disconnect()
