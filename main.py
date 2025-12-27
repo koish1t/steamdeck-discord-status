@@ -16,16 +16,19 @@ OP_HELLO = 10
 OP_HEARTBEAT_ACK = 11
 
 class DiscordGateway:
-    def __init__(self, token):
+    def __init__(self, token, on_disconnect=None):
         self.token = token
         self.ws = None
         self.session = None
         self.heartbeat_interval = None
         self.sequence = None
         self.heartbeat_task = None
+        self.listener_task = None
         self.connected = False
         self.current_activity = None
         self.user = None
+        self.on_disconnect = on_disconnect
+        self.last_heartbeat_ack = True
 
     async def connect(self):
         try:
@@ -67,6 +70,7 @@ class DiscordGateway:
                             self.connected = True
                             self.user = response.get("d", {}).get("user", {})
                             decky.logger.info(f"Connected as {self.user.get('username')}")
+                            self.listener_task = asyncio.create_task(self._listener_loop())
                             return True
                         
                         if response.get("op") == 9:
@@ -116,17 +120,66 @@ class DiscordGateway:
 
     async def _heartbeat_loop(self):
         try:
-            while self.connected or self.ws:
+            while self.connected and self.ws and not self.ws.closed:
+                if not self.last_heartbeat_ack:
+                    decky.logger.error("No heartbeat ACK received, connection dead")
+                    self.connected = False
+                    if self.on_disconnect:
+                        asyncio.create_task(self.on_disconnect())
+                    break
+                
+                self.last_heartbeat_ack = False
+                await self.ws.send_json({
+                    "op": OP_HEARTBEAT,
+                    "d": self.sequence
+                })
                 await asyncio.sleep(self.heartbeat_interval)
-                if self.ws and not self.ws.closed:
-                    await self.ws.send_json({
-                        "op": OP_HEARTBEAT,
-                        "d": self.sequence
-                    })
         except asyncio.CancelledError:
             pass
         except Exception as e:
             decky.logger.error(f"Heartbeat error: {e}")
+            self.connected = False
+            if self.on_disconnect:
+                asyncio.create_task(self.on_disconnect())
+
+    async def _listener_loop(self):
+        try:
+            while self.connected and self.ws and not self.ws.closed:
+                try:
+                    msg = await asyncio.wait_for(self.ws.receive(), timeout=60.0)
+                    if msg.type == aiohttp.WSMsgType.TEXT:
+                        data = json.loads(msg.data)
+                        if data.get("s"):
+                            self.sequence = data.get("s")
+                        if data.get("op") == OP_HEARTBEAT_ACK:
+                            self.last_heartbeat_ack = True
+                        elif data.get("op") == 7:
+                            decky.logger.info("Received reconnect request")
+                            self.connected = False
+                            if self.on_disconnect:
+                                asyncio.create_task(self.on_disconnect())
+                            break
+                        elif data.get("op") == 9:
+                            decky.logger.error("Session invalidated")
+                            self.connected = False
+                            if self.on_disconnect:
+                                asyncio.create_task(self.on_disconnect())
+                            break
+                    elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+                        decky.logger.error("WebSocket closed/error in listener")
+                        self.connected = False
+                        if self.on_disconnect:
+                            asyncio.create_task(self.on_disconnect())
+                        break
+                except asyncio.TimeoutError:
+                    continue
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            decky.logger.error(f"Listener error: {e}")
+            self.connected = False
+            if self.on_disconnect:
+                asyncio.create_task(self.on_disconnect())
 
     async def update_presence(self, activity):
         if not self.ws or self.ws.closed:
@@ -147,17 +200,30 @@ class DiscordGateway:
                     "timestamps": {
                         "start": activity["startTime"]
                     },
-                    "state": "on Steam Deck"
+                    "details": "on Steam Deck",
+                    "assets": {
+                        "large_image": activity.get("imageUrl", "steamdeck"),
+                        "large_text": game_name,
+                        "small_image": "https://cdn.discordapp.com/app-assets/1055680235682672682/1056080943783354388.png",
+                        "small_text": "Steam Deck"
+                    }
                 }
             else:
                 game_activity = {
                     "name": game_name,
                     "type": 0,
+                    "application_id": DEFAULT_APP_ID,
                     "timestamps": {
                         "start": activity["startTime"]
                     },
-                    "state": "on Steam Deck"
+                    "state": "on Steam Deck",
+                    "details": f"Playing {game_name}"
                 }
+                if activity.get("imageUrl"):
+                    game_activity["assets"] = {
+                        "large_image": activity["imageUrl"],
+                        "large_text": game_name
+                    }
             
             activities.append(game_activity)
         
@@ -188,6 +254,13 @@ class DiscordGateway:
             except asyncio.CancelledError:
                 pass
             self.heartbeat_task = None
+        if self.listener_task:
+            self.listener_task.cancel()
+            try:
+                await self.listener_task
+            except asyncio.CancelledError:
+                pass
+            self.listener_task = None
         if self.ws:
             await self.ws.close()
             self.ws = None
@@ -199,6 +272,8 @@ class Plugin:
     def __init__(self):
         self.gateway = None
         self.token = None
+        self.reconnect_attempts = 0
+        self.max_reconnect_attempts = 5
 
     async def set_token(self, token):
         self.token = token
@@ -207,20 +282,32 @@ class Plugin:
     async def get_token(self):
         return self.token or ""
 
+    async def _handle_disconnect(self):
+        decky.logger.info("Handling disconnect, attempting reconnect...")
+        await asyncio.sleep(5)
+        if self.reconnect_attempts < self.max_reconnect_attempts:
+            self.reconnect_attempts += 1
+            await self.connect()
+        else:
+            decky.logger.error("Max reconnect attempts reached")
+            self.reconnect_attempts = 0
+
     async def connect(self):
-        decky.logger.info("Connect called")
         if not self.token:
             decky.logger.error("No token set")
             return False
         
-        decky.logger.info(f"Connecting with token length: {len(self.token)}")
-        
         if self.gateway:
             await self.gateway.close()
         
-        self.gateway = DiscordGateway(self.token)
+        self.gateway = DiscordGateway(self.token, on_disconnect=self._handle_disconnect)
         result = await self.gateway.connect()
-        decky.logger.info(f"Connection result: {result}")
+        
+        if result:
+            self.reconnect_attempts = 0
+            if self.gateway.current_activity:
+                await self.gateway.update_presence(self.gateway.current_activity)
+        
         return result
 
     async def is_connected(self):
