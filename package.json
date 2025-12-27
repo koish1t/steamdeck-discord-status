@@ -1,6 +1,6 @@
 {
-    "name": "steamdeck-discord-status",
-    "version": "1.5.0",
+    "name": "decky-status",
+    "version": "1.0.0",
     "description": "Decky plugin to update Discord's Rich Presence status with whatever you are currently playing",
     "type": "module",
     "scripts": {
@@ -10,7 +10,7 @@
     },
     "repository": {
         "type": "git",
-        "url": "git+https://github.com/andrewburgess/steamdeck-discord-status.git"
+        "url": "git+https://github.com/koish1t/steamdeck-discord-status.git"
     },
     "keywords": [
         "decky",
@@ -19,12 +19,12 @@
         "deck",
         "discord"
     ],
-    "author": "Andrew Burgess <andrew@andrewburgess.io>",
+    "author": "koish1t <funkiin.forever@gmail.com>",
     "license": "BSD-3-Clause",
     "bugs": {
-        "url": "https://github.com/andrewburgess/steamdeck-discord-status/issues"
+        "url": "https://github.com/koish1t/steamdeck-discord-status/issues"
     },
-    "homepage": "https://github.com/andrewburgess/steamdeck-discord-status#readme",
+    "homepage": "https://github.com/koish1t/steamdeck-discord-status#readme",
     "devDependencies": {
         "@decky/rollup": "^1.0.1",
         "@decky/ui": "^4.11.0",
