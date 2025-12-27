@@ -6,6 +6,7 @@ import certifi
 import decky
 
 GATEWAY_URL = "wss://gateway.discord.gg/?v=10&encoding=json"
+DEFAULT_APP_ID = "1055680235682672682"
 
 OP_DISPATCH = 0
 OP_HEARTBEAT = 1
@@ -135,17 +136,27 @@ class DiscordGateway:
         
         activities = []
         if activity:
-            game_activity = {
-                "name": activity["details"]["name"],
-                "type": 0,
-                "timestamps": {
-                    "start": activity["startTime"]
-                }
-            }
+            discord_id = activity.get("discordId")
+            game_name = activity["details"]["name"]
             
-            if "imageUrl" in activity and activity["imageUrl"]:
-                game_activity["assets"] = {
-                    "large_image": activity["imageUrl"]
+            if discord_id:
+                game_activity = {
+                    "name": game_name,
+                    "type": 0,
+                    "application_id": discord_id,
+                    "timestamps": {
+                        "start": activity["startTime"]
+                    },
+                    "state": "on Steam Deck"
+                }
+            else:
+                game_activity = {
+                    "name": game_name,
+                    "type": 0,
+                    "timestamps": {
+                        "start": activity["startTime"]
+                    },
+                    "state": "on Steam Deck"
                 }
             
             activities.append(game_activity)

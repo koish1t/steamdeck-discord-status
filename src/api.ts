@@ -10,6 +10,7 @@ const log = logger('API');
 
 enum StorageKeys {
     Activities = 'discord-status:activities',
+    DetectableCache = 'discord-status:apps',
     DiscordToken = 'discord-status:token',
     RunningActivity = 'discord-status:running-activity',
     SuspendTime = 'discord-status:suspend-time'
@@ -20,9 +21,15 @@ export interface Activity {
     details: {
         name: string;
     };
+    discordId?: string;
     startTime: number;
     imageUrl: string;
     localImageUrl: string;
+}
+
+interface DiscordDetectableApplication {
+    id: string;
+    name: string;
 }
 
 export interface DiscordUser {
@@ -111,12 +118,40 @@ export class Api extends EventEmitter {
         this.hooks.push(SteamClient.User.RegisterForPrepareForSystemSuspendProgress(this.onSuspend.bind(this)));
 
         this.loadToken();
+        this.loadDetectableDiscordApps();
         this.updateActivityState();
     }
 
     public static initialize() {
         Api.instance = new Api();
         return Api.instance;
+    }
+
+    private async loadDetectableDiscordApps() {
+        const cached = window.localStorage.getItem(StorageKeys.DetectableCache);
+
+        if (cached) {
+            try {
+                const parsed = JSON.parse(cached);
+                if (Date.now() - parsed.lastFetch < 1000 * 60 * 60 * 24) {
+                    return parsed.applications;
+                }
+            } catch {}
+        }
+
+        try {
+            const response = await fetch('https://discord.com/api/v10/applications/detectable');
+            const data = await response.json();
+
+            window.localStorage.setItem(StorageKeys.DetectableCache, JSON.stringify({
+                lastFetch: Date.now(),
+                applications: data
+            }));
+
+            return data;
+        } catch {
+            return [];
+        }
     }
 
     private async loadToken() {
@@ -259,11 +294,26 @@ export class Api extends EventEmitter {
             }
         }
 
+        let discordId: string | undefined = undefined;
+        const detectableCached = window.localStorage.getItem(StorageKeys.DetectableCache);
+        if (detectableCached) {
+            try {
+                const detectable = JSON.parse(detectableCached);
+                const found = detectable.applications?.find(
+                    (app: DiscordDetectableApplication) => app.name === appInfo.display_name
+                );
+                if (found) {
+                    discordId = found.id;
+                }
+            } catch {}
+        }
+
         return {
             appId: appInfo.appid.toString(),
             details: {
                 name: appInfo.display_name
             },
+            discordId,
             startTime: startTime?.getTime() ?? Date.now(),
             imageUrl: image,
             localImageUrl: localImageUrl
