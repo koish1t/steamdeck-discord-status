@@ -11,3 +11,10 @@ This requires you to use your discord token meaning it IS against TOS (iirc) so 
 1. Get your discord token
 2. Enter it in
 3. Tap "Save Token & Connect"
+
+## BUILDING
+
+```
+pnpm i
+pnpm run build
+```

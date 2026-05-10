@@ -140,8 +140,6 @@ class DiscordGateway:
                     "timestamps": {"start": activity["startTime"]},
                     "details": "on Steam Deck",
                     "assets": {
-                        "large_image": activity.get("imageUrl", "steamdeck"),
-                        "large_text": game_name,
                         "small_image": "https://cdn.discordapp.com/app-assets/1055680235682672682/1056080943783354388.png",
                         "small_text": "Steam Deck"
                     }
@@ -155,9 +153,10 @@ class DiscordGateway:
                     "state": "on Steam Deck",
                     "details": f"Playing {game_name}"
                 }
-                if activity.get("imageUrl"):
+                image_url = activity.get("imageUrl", "")
+                if image_url and image_url.startswith("http"):
                     game_activity["assets"] = {
-                        "large_image": activity["imageUrl"],
+                        "large_image": image_url,
                         "large_text": game_name
                     }
             

@@ -285,8 +285,8 @@ export class Api extends EventEmitter {
         let image =
             appInfo.app_type === AppType.Shortcut
                 ? 'https://cdn.discordapp.com/app-assets/1055680235682672682/1057044202631987340.png'
-                : appStore.GetVerticalCapsuleURLForApp(appInfo);
-        let localImageUrl = image;
+                : `https://cdn.cloudflare.steamstatic.com/steam/apps/${appInfo.appid}/library_600x900.jpg`;
+        let localImageUrl = appStore.GetVerticalCapsuleURLForApp(appInfo) || image;
         if (appInfo.app_type === AppType.Shortcut) {
             const urls = appStore.GetCustomVerticalCapsuleURLs(appInfo);
             if (urls.length) {
